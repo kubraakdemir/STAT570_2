@@ -1,0 +1,354 @@
+---
+title: "STAT 570 HW1"
+format: html
+editor: visual
+---
+
+## Hoousing in Luxembourg
+
+We are going to use data about house prices in Luxembourg that is a little Western European country the author hails from that looks like a shoe and is about the size of .98 Rhode Islands.
+
+## Downloading Dataset
+
+Before we download the dataset, let's load some packages:
+
+```{r}
+#| echo: false
+#| warning: false
+library(dplyr)
+library(purrr)
+library(readxl)
+library(stringr)
+library(janitor)
+```
+
+Now, let's downloads the data, and outs it in a data frame:
+
+```{r}
+#| echo: false
+#| warning: false
+
+# The url below points to an Excel file
+# hosted on the book’s github repository
+url <- "https://is.gd/1vvBAc"
+
+raw_data <- tempfile(fileext = ".xlsx")
+
+download.file(url, raw_data,
+              method = "auto",
+              mode = "wb")
+
+sheets <- excel_sheets(raw_data)
+
+read_clean <- function(..., sheet){
+  read_excel(..., sheet = sheet) |>
+    mutate(year = sheet)
+}
+
+raw_data <- map(
+  sheets,
+  ~read_clean(raw_data,
+              skip = 10,
+              sheet = .)
+                   ) |>
+  bind_rows() |>
+  clean_names()
+
+raw_data <- raw_data |>
+  rename(
+    locality = commune,
+    n_offers = nombre_doffres,
+    average_price_nominal_euros = prix_moyen_annonce_en_courant,
+    average_price_m2_nominal_euros = prix_moyen_annonce_au_m2_en_courant,
+    average_price_m2_nominal_euros = prix_moyen_annonce_au_m2_en_courant
+  ) |>
+  mutate(locality = str_trim(locality)) |>
+  select(year, locality, n_offers, starts_with("average"))
+```
+
+Let's see the data set:
+
+```{r}
+#| echo: false
+#| warning: false
+raw_data
+
+```
+
+When we look at the data set, we can see that there is a problem that is columns should be of type numeric are of type character instead. Also, the naming of the communes is not consistent.
+
+Let's see:
+
+```{r}
+#| echo: false
+#| warning: false
+
+raw_data |>
+  filter(grepl("Luxembourg", locality)) |>
+  count(locality)
+```
+
+We can see that the city of Luxembourg is spelled in two different ways. It's the same with another commune:
+
+```{r}
+#| echo: false
+#| warning: false
+
+raw_data |>
+  filter(grepl("P.tange", locality)) |>
+  count(locality)
+```
+
+Now, let's correct both these issues:
+
+```{r}
+#| echo: false
+#| warning: false
+
+raw_data <- raw_data |>
+  mutate(
+    locality = ifelse(grepl("Luxembourg-Ville", locality),
+                      "Luxembourg",
+                      locality),
+         locality = ifelse(grepl("P.tange", locality),
+                           "Pétange",
+                           locality)
+         ) |>
+  mutate(across(starts_with("average"),
+         as.numeric))
+```
+
+Converting "average" columns to numeric causes some NA values. Let's see what happened:
+
+```{r}
+#| echo: false
+#| warning: false
+
+raw_data |>
+  filter(is.na(average_price_nominal_euros))
+```
+
+It turns out that there are no prices for certain communes, but that we also have some rows with garbage in there. Let's go back to the raw data to see what this is about:
+
+![](https://raps-with-r.dev/images/obs_hab_xlsx_missing.png)
+
+We need to filter the data by removing specific rows. Firstly, eliminate the rows where the 'locality' information is missing. Next, exclude the row where 'locality' is labeled as 'Total d\'offres' since it represents the total offers from all communes. This row can either be kept in a separate dataset or removed entirely. Additionally, remove the very last row as it contains the source information.
+
+Furthermore, in the provided screenshot, there is an additional row that is not visible in our filtered data frame, where 'n_offers' is missing. This row provides the national average for columns 'average_price_nominal_euros' and 'average_price_m2_nominal_euros.' To handle this, let's create two distinct datasets: one containing commune-specific data and the other with national price information. Start by removing the rows mentioning the data sources, then keep the communes in our data.
+
+```{r}
+#| echo: false
+#| warning: false
+
+raw_data <- raw_data |>
+  filter(!grepl("Source", locality))
+```
+
+```{r}
+#| echo: false
+#| warning: false
+commune_level_data <- raw_data |>
+    filter(!grepl("nationale|offres", locality),
+           !is.na(locality))
+```
+
+After that, let's create a dataset with the national data as well:
+
+```{r}
+#| echo: false
+#| warning: false
+country_level <- raw_data |>
+  filter(grepl("nationale", locality)) |>
+  select(-n_offers)
+
+offers_country <- raw_data |>
+  filter(grepl("Total d.offres", locality)) |>
+  select(year, n_offers)
+
+country_level_data <- full_join(country_level, offers_country) |>
+  select(year, locality, n_offers, everything()) |>
+  mutate(locality = "Grand-Duchy of Luxembourg")
+
+head(country_level_data)
+```
+
+Now the data looks clean, and we can start the actual analysis after make sure that we got every commune in there. For this, we need a list of communes from Luuxembour. Thankfully, [Wikipedia has such a list.](https://en.wikipedia.org/wiki/List_of_communes_of_Luxembourg)
+
+Let's scrape and save this list to get full control of this page.
+
+```{r}
+#| echo: false
+#| warning: false
+current_communes <- "https://is.gd/lux_communes" |>
+  rvest::read_html() |>
+  rvest::html_table() |>
+  purrr::pluck(2) |>
+  janitor::clean_names() |>
+  dplyr::filter(name_2 != "Name") |>
+  dplyr::rename(commune = name_2) |>
+  dplyr::mutate(commune = stringr::str_remove(commune, " .$"))
+```
+
+Then, let's see if we have all the communes in our data:
+
+```{r}
+#| warning: false
+#| echo: false
+
+setdiff(unique(commune_level_data$locality),
+        current_communes$commune)
+```
+
+We have noticed disparities between the communes listed in our 'commune_level_data' and 'current_communes.' These differences can be attributed to various reasons, such as spelling discrepancies like 'Kaerjeng' in our data versus 'Käerjeng' in the Wikipedia table. Additionally, some communes have merged into new ones since 2010, causing certain communes to disappear from our data starting in 2012.
+
+To address this, we need to take several steps: firstly, compile a comprehensive list of all existing communes from 2010 onwards. Secondly, standardize the spellings to ensure consistency. For this task, we can utilize a list from Wikipedia, which will be re-hosted on Github pages to prevent future issues.
+
+```{r}
+#| warning: false
+#| echo: false
+
+
+former_communes <- "https://is.gd/lux_former_communes" |>
+  rvest::read_html() |>
+  rvest::html_table() |>
+  purrr::pluck(3) |>
+  janitor::clean_names() |>
+  dplyr::filter(year_dissolved > 2009)
+
+former_communes
+```
+
+As you can see, since 2010 many communes have merged to form new ones. We can now combine the list of current and former communes, as well as harmonise their names, and then run our test again.
+
+```{r}
+#| echo: false
+communes <- unique(c(former_communes$name,
+                     current_communes$commune))
+# we need to rename some communes
+
+# Different spelling of these communes between wikipedia and the data
+
+communes[which(communes == "Clemency")] <- "Clémency"
+communes[which(communes == "Redange")] <- "Redange-sur-Attert"
+communes[which(communes == "Erpeldange-sur-Sûre")] <- "Erpeldange"
+communes[which(communes == "Luxembourg City")] <- "Luxembourg"
+communes[which(communes == "Käerjeng")] <- "Kaerjeng"
+communes[which(communes == "Petange")] <- "Pétange"
+```
+
+```{r}
+setdiff(unique(commune_level_data$locality),
+        communes)
+```
+
+Now, every commune has existed since 2010, we don't have any commune that is unaccounted for. After cleaning the data, we can now start with analysing the data.
+
+## Analysing the Data
+
+First of all, let's compute the Laspeyeres index for each commune:
+
+```{r}
+#| warning: false
+#| echo: false
+
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(tidyr)
+```
+
+```{r}
+commune_level_data <- commune_level_data %>%
+  group_by(locality) %>%
+  mutate(p0 = ifelse(year == "2010", average_price_nominal_euros, NA)) %>%
+  fill(p0, .direction = "down") %>%
+  mutate(p0_m2 = ifelse(year == "2010", average_price_m2_nominal_euros, NA)) %>%
+  fill(p0_m2, .direction = "down") %>%
+  ungroup() %>%
+  mutate(pl = average_price_nominal_euros/p0*100,
+         pl_m2 = average_price_m2_nominal_euros/p0_m2*100)
+
+```
+
+Then, let's compute it for the whole country:
+
+```{r}
+country_level_data <- country_level_data %>%
+  mutate(p0 = ifelse(year == "2010", average_price_nominal_euros, NA)) %>%
+  fill(p0, .direction = "down") %>%
+  mutate(p0_m2 = ifelse(year == "2010", average_price_m2_nominal_euros, NA)) %>%
+  fill(p0_m2, .direction = "down") %>%
+  mutate(pl = average_price_nominal_euros/p0*100,
+         pl_m2 = average_price_m2_nominal_euros/p0_m2*100)
+```
+
+Now, we are going to create a plot for 3 communes, and compare the price evolution in the communes to the national price evolution.
+
+List of the communes:
+
+```{r}
+communes <- c("Luxembourg",
+              "Esch-sur-Alzette",
+              "Mamer")
+```
+
+Plot of Luxembourg:
+
+```{r}
+#| echo: false
+
+filtered_data <- commune_level_data %>%
+  filter(locality == communes[1])
+
+data_to_plot <- bind_rows(
+  country_level_data,
+  filtered_data
+)
+
+lux_plot <- ggplot(data_to_plot) +
+  geom_line(aes(y = pl_m2,
+                x = year,
+                group = locality,
+                colour = locality))
+lux_plot
+```
+
+Plot of Esch sur Alzette:
+
+```{r}
+#| echo: false
+filtered_data <- commune_level_data %>%
+  filter(locality == communes[2])
+
+data_to_plot <- bind_rows(
+  country_level_data,
+  filtered_data
+)
+
+esch_plot <- ggplot(data_to_plot) +
+  geom_line(aes(y = pl_m2,
+                x = year,
+                group = locality,
+                colour = locality))
+esch_plot
+```
+
+Plot of Mamer:
+
+```{r}
+#| echo: false
+filtered_data <- commune_level_data %>%
+  filter(locality == communes[3])
+
+data_to_plot <- bind_rows(
+  country_level_data,
+  filtered_data
+)
+
+mamer_plot <- ggplot(data_to_plot) +
+  geom_line(aes(y = pl_m2,
+                x = year,
+                group = locality,
+                colour = locality))
+mamer_plot
+```
